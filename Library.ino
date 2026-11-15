@@ -6,6 +6,7 @@
 #include <time.h>
 
 // ==================== НАСТРОЙКИ ====================
+
 const char* ssid     = "MERCUSYS_FE88";
 const char* password = "92233911";
 
@@ -18,10 +19,7 @@ const char* password = "92233911";
 
 MFRC522 rfidUser(SS_USER, RST_USER);
 MFRC522 rfidBook(SS_BOOK, RST_BOOK);
-
-String lastUserUID = "";
-String lastBookUID = "";
-
+мщш
 WebServer server(80);
 
 const char* F_USERS = "/users.csv";
@@ -625,19 +623,65 @@ void migrateHistory() {
   }
 }
 
-// ==================== RFID ====================
-String readTag(MFRC522* r) {
-  if (!r->PICC_IsNewCardPresent()) return "";
-  if (!r->PICC_ReadCardSerial())   return "";
-  String uid = "";
-  for (byte i = 0; i < r->uid.size; i++) {
-    if (r->uid.uidByte[i] < 0x10) uid += "0";
-    uid += String(r->uid.uidByte[i], HEX);
+// ==================== RFID / NTAG21x ====================
+// NTAG216 использует ISO14443-A и 7-байтовый UID.
+// WUPA будит также метку, уже переведённую в HALT после прошлого чтения.
+String readTag(MFRC522& reader) {
+  byte atqa[2] = {0, 0};
+  byte atqaSize = sizeof(atqa);
+
+  MFRC522::StatusCode status = reader.PICC_WakeupA(atqa, &atqaSize);
+  if (status != MFRC522::STATUS_OK &&
+      status != MFRC522::STATUS_COLLISION) {
+    return "";
   }
-  uid.toUpperCase();
-  r->PICC_HaltA();
-  r->PCD_StopCrypto1();
+
+  if (!reader.PICC_ReadCardSerial()) {
+    return "";
+  }
+
+  String uid;
+  uid.reserve(reader.uid.size * 2);
+  for (byte i = 0; i < reader.uid.size; i++) {
+    char hexByte[3];
+    snprintf(hexByte, sizeof(hexByte), "%02X", reader.uid.uidByte[i]);
+    uid += hexByte;
+  }
+
+  reader.PICC_HaltA();
+  reader.PCD_StopCrypto1();
   return uid;
+}
+
+// Сканирование запускается только по запросу сайта. Это исключает выдачу
+// старого UID, который ранее оставался в lastUserUID/lastBookUID.
+String waitForTag(MFRC522& reader, const char* readerName,
+                  uint32_t timeoutMs = 6000) {
+  const uint32_t started = millis();
+
+  while ((uint32_t)(millis() - started) < timeoutMs) {
+    String uid = readTag(reader);
+    if (uid.length()) {
+      Serial.printf("%s UID (%u bytes): %s\n",
+                    readerName, (unsigned)(uid.length() / 2), uid.c_str());
+      return uid;
+    }
+    delay(25);  // даём ESP32 обслуживать Wi-Fi и системные задачи
+  }
+
+  Serial.printf("%s: метка не обнаружена за %lu мс\n",
+                readerName, (unsigned long)timeoutMs);
+  return "";
+}
+
+void apiUidUser() {
+  String uid = waitForTag(rfidUser, "RFID A / USER");
+  server.send(200, "text/plain", uid);
+}
+
+void apiUidBook() {
+  String uid = waitForTag(rfidBook, "RFID B / BOOK");
+  server.send(200, "text/plain", uid);
 }
 
 // ==================== SETUP / LOOP ====================
@@ -654,9 +698,23 @@ void setup() {
   pinMode(SS_BOOK, OUTPUT); digitalWrite(SS_BOOK, HIGH);
   rfidUser.PCD_Init();
   rfidBook.PCD_Init();
+
+  // Максимальное усиление приёма. У обоих модулей отдельный SS,
+  // линии SCK/MISO/MOSI общие.
+  rfidUser.PCD_SetAntennaGain(rfidUser.RxGain_max);
+  rfidBook.PCD_SetAntennaGain(rfidBook.RxGain_max);
   delay(50);
-  Serial.print("RFID A: "); Serial.println(rfidUser.PCD_ReadRegister(MFRC522::VersionReg), HEX);
-  Serial.print("RFID B: "); Serial.println(rfidBook.PCD_ReadRegister(MFRC522::VersionReg), HEX);
+
+  byte verA = rfidUser.PCD_ReadRegister(MFRC522::VersionReg);
+  byte verB = rfidBook.PCD_ReadRegister(MFRC522::VersionReg);
+  Serial.printf("RFID A VersionReg: 0x%02X\n", verA);
+  Serial.printf("RFID B VersionReg: 0x%02X\n", verB);
+  if (verA == 0x00 || verA == 0xFF) {
+    Serial.println("ОШИБКА RFID A: проверьте питание, SPI и SS_USER");
+  }
+  if (verB == 0x00 || verB == 0xFF) {
+    Serial.println("ОШИБКА RFID B: проверьте питание, SPI и SS_BOOK");
+  }
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
@@ -683,8 +741,8 @@ void setup() {
   server.on("/saveuser", HTTP_POST, saveUser);
   server.on("/savebook", HTTP_POST, saveBook);
 
-  server.on("/api/uid/user", HTTP_GET, [](){ server.send(200,"text/plain",lastUserUID); });
-  server.on("/api/uid/book", HTTP_GET, [](){ server.send(200,"text/plain",lastBookUID); });
+  server.on("/api/uid/user", HTTP_GET, apiUidUser);
+  server.on("/api/uid/book", HTTP_GET, apiUidBook);
   server.on("/api/reader", HTTP_GET, apiReader);
   server.on("/api/book",   HTTP_GET, apiBook);
   server.on("/api/borrow", HTTP_GET, apiBorrow);
@@ -697,10 +755,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  String u = readTag(&rfidUser);
-  if (u.length()) { lastUserUID = u; Serial.println("USER: " + u); }
-  String b = readTag(&rfidBook);
-  if (b.length()) { lastBookUID = b; Serial.println("BOOK: " + b); }
+  delay(2);
 }
 
 // ==================== ОБЗОР ====================
@@ -1150,7 +1205,6 @@ void apiBorrow() {
             + ";borrowed;" + rUID + ";" + String(d) + ";" + String(ts) + ";" + String(due);
   replaceLine(F_BOOKS, bUID, nl);
   addHistory(rUID, field(u,1), bUID, field(b,1), "borrow", String(d), ts, due);
-  lastUserUID = ""; lastBookUID = "";
 
   String msg = "<div class=\"note n-ok\">Книга &laquo;" + field(b,1) + "&raquo; выдана: " + field(u,1)
              + ". Срок " + String(d) + " дн.";
@@ -1177,7 +1231,6 @@ void apiReturn() {
   String nl = field(b,0)+";"+field(b,1)+";"+field(b,2)+";"+field(b,3)+";stock;;0;0;0";
   replaceLine(F_BOOKS, bUID, nl);
   addHistory(rUID, field(u,1), bUID, field(b,1), "return", "0", ts, 0);
-  lastUserUID = ""; lastBookUID = "";
 
   String msg = "<div class=\"note n-ok\">Книга &laquo;" + field(b,1) + "&raquo; принята на склад от: " + field(u,1) + ".";
   if (wasLate) msg += " Возврат с просрочкой (отмечено в истории).";
@@ -1189,7 +1242,6 @@ void apiReturn() {
 void pageFormat() {
   LittleFS.format();
   histCounter = 0;
-  lastUserUID = ""; lastBookUID = "";
   beginPage("Сервис","home");
   server.sendContent(R"X(<div class="card"><div class="chd"><h3><span class="bar"></span>Память очищена</h3></div><div class="cbd">
 <p class="hint" style="margin:0 0 12px">База читателей, книг и история удалены.</p>
