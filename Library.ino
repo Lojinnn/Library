@@ -6,8 +6,8 @@
 #include <time.h>
 
 // ==================== НАСТРОЙКИ ====================
-const char* ssid     = "MERCUSYS_FE88";
-const char* password = "92233911";
+const char* ssid     = "Loj";
+const char* password = "LojinProject";
 
 #define SS_USER   12      // считыватель A - карты читателей
 #define RST_USER  22
