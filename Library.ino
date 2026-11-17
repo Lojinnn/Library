@@ -7,8 +7,8 @@
 
 // ==================== НАСТРОЙКИ ====================
 
-const char* ssid     = "MERCUSYS_FE88";
-const char* password = "92233911";
+const char* ssid     = "Loj";
+const char* password = "LojinLojin";
 
 #define SS_USER   12      // считыватель A - карты читателей
 #define RST_USER  22
@@ -19,7 +19,7 @@ const char* password = "92233911";
 
 MFRC522 rfidUser(SS_USER, RST_USER);
 MFRC522 rfidBook(SS_BOOK, RST_BOOK);
-мщш
+
 WebServer server(80);
 
 const char* F_USERS = "/users.csv";
